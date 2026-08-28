@@ -1,0 +1,6 @@
+# BalanSenseNotify needs very little of its own: the calendar read goes through
+# the FitSys scheduler's package (see notifier/fitsys_link.py), which itself
+# only needs `requests`. No playwright and no anthropic here -- this app never
+# opens a browser and never calls a model.
+requests>=2.31
+python-dotenv>=1.0

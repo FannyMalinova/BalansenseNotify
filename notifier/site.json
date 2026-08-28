@@ -1,0 +1,47 @@
+{
+  "_note": "This app's own record of the routes and field names it uses, verified against the live site. It is a deliberate SECOND copy: the FitSys scheduler has its own, richer map covering write routes and discovery, which this app has no business carrying. tests/test_notifier.py compares the two whenever the scheduler happens to be present on the same machine, so drift is caught in development -- but there is no runtime dependency on it.",
+  "_scope": "Read-only. There are no write routes here because there is no write code in this app.",
+  "base_url": "https://balansense.fitsys.com",
+  "login": {
+    "status": "verified",
+    "url": "/users/login",
+    "fields": {"email": "email", "password": "password", "csrf": "_token"},
+    "failure_text": ["Грешно потребителско име или парола", "Грешни", "credentials"]
+  },
+  "calendar": {
+    "status": "verified",
+    "page_url": "/calendar",
+    "site_id": null,
+    "site_id_note": "Read from the calendar page's bootstrap JSON (\"siteId\": N) and cached; set a number here to pin it.",
+    "chunk_days": 7,
+    "chunk_note": "A 4-week request once died mid-response (IncompleteRead); weekly slices succeeded, so reads are chunked.",
+    "include_types": ["class"],
+    "include_types_note": "Feed 'type' seen live: 'class' (a studio class), 'reservation' (an individual client booking) and 'event' (room rentals, pest control). Only classes are watched.",
+    "events_endpoint": {
+      "status": "verified",
+      "url": "/calendar/get-events-basic",
+      "method": "GET",
+      "note": "GET only -- POST returns 500. Returns {\"events\": [...]}. The sibling route /calendar/get-events also works but includes customer names and ids, which this app must never hold.",
+      "params": {"start": "{start}", "end": "{end}", "site_id": "{site_id}"},
+      "date_format": "%Y-%m-%d"
+    },
+    "event_fields": {
+      "status": "verified",
+      "id": ["id"],
+      "title": ["title"],
+      "start": ["start"],
+      "end": ["end"],
+      "instructor": ["instructor_names"],
+      "class_type": ["title"],
+      "room": ["resource_title"],
+      "capacity": ["people"],
+      "booked": ["current_people"],
+      "type": ["type"]
+    },
+    "instructor_pattern": {
+      "status": "verified",
+      "note": "instructor_names looks like '2581_Фани М' -- id, underscore, name.",
+      "strip": "^\\d+_(.+)$"
+    }
+  }
+}

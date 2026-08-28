@@ -1,0 +1,4 @@
+# Only needed when STATE_URI is a gs:// URI, i.e. on Cloud Run, where the
+# container filesystem is thrown away between executions and the snapshot has
+# to live somewhere else. A local install does not need this.
+google-cloud-storage>=2.14

@@ -1,0 +1,11 @@
+# The image needs notifier/ and the two requirements files. Nothing else.
+.venv/
+var/
+.env
+tests/
+cloud/
+.git/
+.gitignore
+README.md
+__pycache__/
+*.pyc
