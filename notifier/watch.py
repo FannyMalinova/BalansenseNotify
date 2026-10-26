@@ -4,12 +4,13 @@ Pure: no clock, no network, no filesystem, and no import of the scheduler. The
 whole reporting decision -- what counts as a sign-up, what gets said -- is
 therefore testable offline with no FitSys account.
 
-The feed this app reads, `calendar/get-events-basic`, carries `current_people`
-and `people` but no customer names or ids at all, so a sign-up is reported
-without ever holding client data. That is also the limit of what it can say: a
-count shows the *net* change, so one client signing out while another signs up
-inside the same interval cancels out and goes unreported. Naming who signed up
-would mean the scheduler's other feed and a client's name sent to Viber.
+This module sees counts and never identities: `fitsys_api` deletes the
+`customer_names` and `customer_ids` the feed now sends before a row reaches
+here, so a sign-up is reported without client data being held. That is also the
+limit of what it can say: a count shows the *net* change, so one client signing
+out while another signs up inside the same interval cancels out and goes
+unreported. Naming who signed up would mean keeping those fields and a client's
+name being sent to Telegram.
 """
 from __future__ import annotations
 

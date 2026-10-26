@@ -9,7 +9,7 @@ the same machine (skipped otherwise, e.g. inside the container).
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 from notifier import channel, mail, state, viber, watch
@@ -752,6 +752,57 @@ def test_parsing_real_feed_rows():
           "no client field can reach the message even when the feed carries it")
 
 
+def test_identities_are_stripped_at_the_edge():
+    """`get-events-basic` was chosen because it carried counts and no
+    identities. Since September 2026 it sends `customer_names` and
+    `customer_ids` too. The parser never read them, but they must not reach it
+    at all: the client deletes them as it reads, so counts-only is enforced
+    here instead of being assumed of the endpoint.
+    """
+    from notifier import fitsys_api
+
+    print("fitsys_api: identities dropped as the feed is read")
+    served = {"events": [
+        {"id": 21, "type": "class", "title": "Реформър група",
+         "instructor_names": "2581_Фани М", "people": 12, "current_people": 4,
+         "start": "2026-09-20 09:00:00", "resource_title": "зала 1",
+         "customer_names": "Елица Попова,Милена  Узунова",
+         "customer_ids": "1166,1528"}]}
+
+    class FakeSession:
+        headers: dict = {}
+
+        def __init__(self):
+            self.calls: list[dict] = []
+
+        def mount(self, *a, **k):
+            pass
+
+        def get(self, url, params=None, timeout=None, headers=None,
+                allow_redirects=None):
+            self.calls.append({"url": url, "headers": headers or {}})
+            class Resp:
+                status_code, ok, text = 200, True, ""
+                def json(self):
+                    return served
+            return Resp()
+
+    client = fitsys_api.Client()
+    client.s = FakeSession()
+    client._site_id = "1"        # the context call is not what is under test
+
+    rows = client._slice(date(2026, 9, 20), date(2026, 9, 26))
+    check(rows and all("customer_names" not in r and "customer_ids" not in r
+                       for r in rows),
+          "customer_names and customer_ids are gone from every row read")
+    check(rows[0]["current_people"] == 4 and str(rows[0]["id"]) == "21",
+          "the counts the app does need survive the strip")
+    check("X-CSRF-TOKEN" not in client.s.calls[0]["headers"],
+          "the feed is a plain GET -- no CSRF header is sent or needed")
+    check(not any("customer" in k for r in rows for k in r),
+          f"no customer field of any name remains, got {sorted(rows[0])}")
+
+
 def test_site_json_describes_reads_only():
     """This app's own site record must describe reads only: there is no write
     code here to route, and none should be invited in."""
@@ -761,7 +812,10 @@ def test_site_json_describes_reads_only():
     site = fitsys_api.load_site()
     check(site["calendar"]["events_endpoint"]["url"]
           == "/calendar/get-events-basic",
-          "the feed used is the one that carries no customer data")
+          "the feed used is the counts feed, not the identities one")
+    check(set(site["calendar"]["events_endpoint"]["drop_fields"])
+          >= {"customer_names", "customer_ids"},
+          "and the identities it now sends anyway are listed for dropping")
     check(site["calendar"]["events_endpoint"]["method"] == "GET",
           "and it is read with GET")
 
@@ -807,7 +861,9 @@ def test_site_json_matches_the_scheduler_when_present():
           f"base_url agrees ({ours['base_url']})")
     check(ours["login"]["url"] == theirs["login"]["url"]
           and ours["login"]["fields"] == theirs["login"]["fields"],
-          "the login route and its form fields agree")
+          f"the login route and its fields agree -- ours is "
+          f"{ours['login']['url']} {sorted(ours['login']['fields'])}, theirs "
+          f"is {theirs['login']['url']} {sorted(theirs['login']['fields'])}")
     oc, tc = ours["calendar"], theirs["calendar"]
     check(oc["page_url"] == tc["page_url"], "the calendar page agrees")
     check(oc["events_endpoint"]["url"] == tc["events_endpoint"]["url"],
@@ -893,13 +949,13 @@ def test_no_write_path():
         check(not clash, f"{name}.py calls nothing that writes to FitSys"
                          + (f" -- found {clash}" if clash else ""))
 
-    # The only POST anywhere is the login form. There is no write endpoint.
+    # The only POST anywhere is the sign-in. There is no write endpoint.
     src = inspect.getsource(fitsys_api)
     posts = src.count(".post(")
     check(posts == 1, f"exactly one POST exists in the client, got {posts}")
     login_line = [l for l in src.splitlines() if ".post(" in l][0]
     check("cfg[\"url\"]" in login_line,
-          f"and it is the login form, got {login_line.strip()!r}")
+          f"and it is the sign-in, got {login_line.strip()!r}")
     check("get-events-basic" in fitsys_api.SITE_FILE.read_text(encoding="utf-8"),
           "the one data route is the read-only feed")
 
@@ -917,6 +973,7 @@ def main() -> int:
     test_gcs_store_guards_against_overlap()
     test_instructor_names()
     test_parsing_real_feed_rows()
+    test_identities_are_stripped_at_the_edge()
     test_site_json_describes_reads_only()
     test_site_json_matches_the_scheduler_when_present()
     test_viber_request_shape()

@@ -12,21 +12,31 @@ edit or cancel, and the one endpoint used is GET-only. `site.json` records no
 write routes because there is nothing here to route.
 
 What it does:
-  * signs in over plain HTTP with a username and password (unattended runs);
-  * reads the calendar page once for the CSRF token and the Vue bootstrap's
-    siteId;
+  * signs in with a username and password (unattended runs), through the
+    Sanctum SPA flow FitSys now uses: ask `/sanctum/csrf-cookie`, POST JSON to
+    `/api/login`, then read `/api/context` for the siteId the feed needs;
   * reads `/calendar/get-events-basic` in weekly slices -- a four-week request
     died mid-response against the live site, weekly ones did not;
   * parses one feed row into an Occupancy.
 
-`/calendar/get-events-basic` carries `current_people` and `people` but no
-customer names or ids. The sibling `/calendar/get-events` does carry them, and
-is deliberately not used.
+The login used to be an HTML form: GET `/users/login`, scrape a hidden `_token`,
+POST the three fields back. That page is now a Vue mount point with no form and
+no inputs in it at all, so the scrape found nothing and every run failed with
+"No _token on the login page". The feed itself did not change -- same route,
+same field names.
+
+`/calendar/get-events-basic` was chosen over the sibling `/calendar/get-events`
+because it carried counts and no identities. It no longer does: it now returns
+`customer_names` and `customer_ids`, populated. The parser never read them, but
+"the endpoint does not send identities" has stopped being true, so `_slice`
+deletes them from every row as it reads it. Counts-only is now something this
+file enforces, not something it inherits.
 """
 from __future__ import annotations
 
 import json
 import re
+import urllib.parse
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -157,10 +167,13 @@ class Client:
         self.site = site or load_site()
         self.base = self.site["base_url"].rstrip("/")
         self.timeout = timeout
-        self._csrf: str | None = None
         self._site_id: str | None = None
         self.s = requests.Session()
+        # Every route this app touches now answers JSON, and Laravel decides
+        # between a JSON body and an HTML redirect on these two headers.
         self.s.headers.update({"User-Agent": UA,
+                               "Accept": "application/json",
+                               "X-Requested-With": "XMLHttpRequest",
                                "Accept-Language": "bg-BG,bg;q=0.9,en;q=0.8"})
         # A long read once died with IncompleteRead; retry the transport too.
         self.s.mount("https://", HTTPAdapter(max_retries=Retry(
@@ -171,57 +184,99 @@ class Client:
         return self.base + "/" + path.lstrip("/")
 
     # -- auth --------------------------------------------------------------- #
-    def is_signed_in(self) -> bool:
-        """One cheap request: the calendar page redirects to the login form when
-        the session is gone."""
+    def _context(self) -> dict:
+        """`/api/context` -- who the session is, and which site it is looking
+        at. Raises rather than returning a default: a wrong siteId would read
+        somebody else's calendar and report it as this studio's.
+        """
+        cfg = self.site["login"]
         try:
-            r = self.s.get(self.url(self.site["calendar"]["page_url"]),
-                           timeout=self.timeout, allow_redirects=True)
-        except requests.RequestException:
-            return False
+            r = self.s.get(self.url(cfg["context_url"]), timeout=self.timeout)
+        except requests.RequestException as exc:
+            raise ReadFailed(f'GET {cfg["context_url"]} failed: '
+                             f'{type(exc).__name__}: {exc}') from exc
         if r.status_code in (401, 403, 419):
+            raise NotSignedIn("FitSys says this session is not signed in.")
+        if not r.ok:
+            raise ReadFailed(f'GET {cfg["context_url"]} -> HTTP {r.status_code}')
+        try:
+            ctx = r.json()
+        except ValueError:
+            raise NotSignedIn(f'GET {cfg["context_url"]} returned HTTP 200 but '
+                              f'not JSON -- the session has probably expired.'
+                              ) from None
+        if not isinstance(ctx, dict):
+            raise ReadFailed(f'GET {cfg["context_url"]} returned '
+                             f'{type(ctx).__name__}, not an object.')
+        return ctx
+
+    def is_signed_in(self) -> bool:
+        """One cheap request: `/api/context` is 200 JSON with a session and 401
+        without one."""
+        try:
+            return bool(self._context().get("user_id"))
+        except (NotSignedIn, ReadFailed):
             return False
-        return self.site["login"]["url"] not in r.url and r.ok
 
     def sign_in(self, user: str, password: str) -> None:
+        """Sanctum's SPA flow, which is what the FitSys front end does.
+
+        The old HTML form is gone, so there is no hidden `_token` to scrape and
+        no form fields to post; credentials go as JSON instead.
+        """
         cfg = self.site["login"]
         f = cfg["fields"]
-        page = self.s.get(self.url(cfg["url"]), timeout=self.timeout).text
-        m = re.search(rf'name="{f["csrf"]}"\s+value="([^"]+)"', page)
-        if not m:
-            raise NotSignedIn(f'No {f["csrf"]} on the login page -- the login '
-                              f'form has probably changed.')
+        # The SPA asks for the XSRF cookie first, so do the same. On the live
+        # site this answers 401 and sets no cookie, and the login below still
+        # succeeds on the session cookie alone -- so it must not be fatal.
+        try:
+            self.s.get(self.url(cfg["csrf_cookie_url"]), timeout=self.timeout)
+        except requests.RequestException:
+            pass
+        headers = {}
+        xsrf = urllib.parse.unquote(self.s.cookies.get("XSRF-TOKEN") or "")
+        if xsrf:                     # only when Sanctum actually issued one
+            headers["X-XSRF-TOKEN"] = xsrf
         r = self.s.post(self.url(cfg["url"]), timeout=self.timeout,
-                        data={f["csrf"]: m.group(1), f["email"]: user,
-                              f["password"]: password}, allow_redirects=True)
+                        headers=headers,
+                        json={f["email"]: user, f["password"]: password,
+                              f["user_id"]: None})
+        if not r.ok:
+            # A rejection is 422 {"message": "Invalid credentials"} -- quote it
+            # rather than guessing at Bulgarian error text in an HTML page.
+            said = ""
+            try:
+                body = r.json()
+                if isinstance(body, dict) and body.get("message"):
+                    said = f': {body["message"]}'
+            except ValueError:
+                pass
+            raise NotSignedIn(f"FitSys refused the sign-in (HTTP "
+                              f"{r.status_code}{said}). Check FITSYS_USER and "
+                              f"FITSYS_PASS.")
+        self._site_id = None
         if not self.is_signed_in():
-            hint = "; ".join(t for t in cfg.get("failure_text", [])
-                             if t.lower() in r.text.lower())
-            raise NotSignedIn("FitSys refused the sign-in"
-                              + (f" ({hint})" if hint else "")
-                              + ". Check FITSYS_USER and FITSYS_PASS.")
-        self._csrf = None
+            raise NotSignedIn("FitSys accepted the sign-in but the session does "
+                              "not read as signed in. Check "
+                              "login.context_url in notifier/site.json.")
 
-    def _bootstrap(self) -> tuple[str, str]:
-        """The calendar page carries both things the feed needs: a CSRF token
-        and the Vue bootstrap's siteId."""
-        if self._csrf and self._site_id:
-            return self._csrf, self._site_id
-        html = self.s.get(self.url(self.site["calendar"]["page_url"]),
-                          timeout=self.timeout).text
-        m = (re.search(r'<meta name="csrf-token" content="([^"]+)"', html)
-             or re.search(r'name="_token"\s+value="([^"]+)"', html))
-        if not m:
-            raise NotSignedIn("No CSRF token on the calendar page -- the "
-                              "session has probably expired.")
-        self._csrf = m.group(1)
+    def _resolve_site_id(self) -> str:
+        """Which site the feed is asked about. Pinned in site.json, or taken
+        from the context. The calendar page's bootstrap JSON used to carry it
+        and no longer does."""
+        if self._site_id:
+            return self._site_id
         pinned = self.site["calendar"].get("site_id")
         if pinned:
             self._site_id = str(pinned)
-        else:
-            sid = re.search(r'"siteId"\s*:\s*(\d+)', html)
-            self._site_id = sid.group(1) if sid else "1"
-        return self._csrf, self._site_id
+            return self._site_id
+        sid = self._context().get("siteId")
+        if sid in (None, ""):
+            raise ReadFailed(
+                "No siteId in the context response -- cannot tell which site "
+                "to read. Pin calendar.site_id in notifier/site.json.")
+        self._site_id = str(sid)
+        return self._site_id
 
     # -- read --------------------------------------------------------------- #
     @staticmethod
@@ -237,7 +292,7 @@ class Client:
 
     def _slice(self, start: date, end: date) -> list:
         ep = self.site["calendar"]["events_endpoint"]
-        csrf, site_id = self._bootstrap()
+        site_id = self._resolve_site_id()
         fmt = ep["date_format"]
         params = {k: (v.replace("{start}", start.strftime(fmt))
                        .replace("{end}", end.strftime(fmt))
@@ -246,10 +301,8 @@ class Client:
         try:
             r = self.s.get(self.url(ep["url"]), params=params,
                            timeout=self.timeout,
-                           headers={"X-Requested-With": "XMLHttpRequest",
-                                    "X-CSRF-TOKEN": csrf,
-                                    "Referer": self.url(
-                                        self.site["calendar"]["page_url"])})
+                           headers={"Referer": self.url(
+                               self.site["calendar"]["page_url"])})
         except requests.RequestException as exc:
             raise ReadFailed(f"GET {ep['url']} [{start}..{end}] failed: "
                              f"{type(exc).__name__}: {exc}") from exc
@@ -269,6 +322,13 @@ class Client:
                 f"GET {ep['url']} returned JSON with no event list; keys were "
                 f"{sorted(payload)[:8] if isinstance(payload, dict) else type(payload).__name__}. "
                 f"Check calendar.events_endpoint in notifier/site.json.")
+        # The identities the feed now sends stop here, at the edge, before any
+        # row is stored, parsed or logged. Nothing downstream has to be trusted
+        # to leave them alone.
+        for row in rows:
+            if isinstance(row, dict):
+                for name in ep.get("drop_fields") or ():
+                    row.pop(name, None)
         return rows
 
     def read(self, start: date, end: date, *, instructor: str = "",
@@ -293,8 +353,8 @@ def client_from_env(timeout: int = 30) -> Client:
     """A signed-in client, or a clear instruction to fix the configuration.
 
     There is no cookie file and no browser: this app runs unattended, so it
-    signs in with FITSYS_USER / FITSYS_PASS every time. At seven runs a day that
-    is seven logins, which is why persisting a session is not worth the state.
+    signs in with FITSYS_USER / FITSYS_PASS every time. At nineteen runs a day
+    that is nineteen logins, which is still cheaper than owning session state.
     """
     import os
 

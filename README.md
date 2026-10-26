@@ -37,15 +37,21 @@ Body Ballet за начинаещи · петък 28.08 12:00 · зала 1
 Общо записани: 53 в 60 класа
 ```
 
-Counts, never names. The feed this reads (`calendar/get-events-basic`) carries
-`current_people` and `people` but no customer names or ids at all, so a sign-up
-is reported without the program ever holding client data. Open FitSys itself to
-see who.
+Counts, never names. The feed this reads (`calendar/get-events-basic`) gives
+`current_people` and `people`, and a sign-up is reported without the program
+ever holding client data. Open FitSys itself to see who.
+
+That feed was picked because it carried no identities at all, but as of
+September 2026 it does send `customer_names` and `customer_ids`. So the client
+now deletes both from every row as it reads it, before anything is parsed,
+stored or logged — counts-only is enforced on this side rather than assumed of
+the endpoint.
 
 That is also the one limitation worth knowing: a count shows the **net** change.
-If one client signs out while another signs up inside the same interval, the
-number is unchanged and nothing is reported. Naming the client would mean the
-scheduler's other feed and a client's name being sent to Viber's servers.
+If one client signs out while another signs up inside the same polling interval,
+the number is unchanged and nothing is reported. The interval is an hour, so the
+window for that is small but real; naming the client instead would mean keeping
+those fields and a client's name leaving the machine.
 
 ## Install
 
@@ -115,8 +121,8 @@ given name or a wrong initial is caught.
 One shot per invocation; cron sets the cadence:
 
 ```cron
-# every 3 hours from 06:00 through midnight (Europe/Sofia)
-0 0,6,9,12,15,18,21 * * * cd /path/to/BalanSenseNotify && \
+# hourly from 06:00 through midnight (Europe/Sofia)
+0 0,6-23 * * * cd /path/to/BalanSenseNotify && \
               .venv/bin/python -m notifier.cli >> var/notify.log 2>&1
 ```
 
@@ -291,30 +297,33 @@ The image is `notifier/` plus `requests`,
 
 **Read-only is structural here, not configured.** There is no POST to the
 calendar anywhere in the image: `fitsys_api.py` has exactly one `.post(`, the
-login form, and the one data route is `GET /calendar/get-events-basic`, which is
-GET-only server-side. `site.json` describes no write routes because there is no
-write code to route. A test asserts all of that.
+sign-in to `/api/login`, and the one data route is `GET
+/calendar/get-events-basic`, which is GET-only server-side. `site.json`
+describes no write routes because there is no write code to route. A test
+asserts all of that.
 
 ### Secrets, and what it can reach
 
-`FITSYS_USER`, `FITSYS_PASS`, `TELEGRAM_TOKEN` and `TELEGRAM_CHAT_ID` go into
-Secret Manager and are mounted as env vars — not `--set-env-vars`, which would
-put the FitSys password into the job description and the deploy logs. The job
-gets its own service account with exactly two grants: `objectAdmin` on the one
-bucket, and `secretAccessor` on those four secrets.
+`FITSYS_USER`, `FITSYS_PASS`, `TELEGRAM_TOKEN`, `TELEGRAM_CHAT_ID` and
+`NOTIFY_INSTRUCTOR` go into Secret Manager and are mounted as env vars — not
+`--set-env-vars`, which would put the FitSys password into the job description
+and the deploy logs. The job runs as the project's default compute service
+account, which `deploy.sh` grants `objectAdmin` on the one bucket and
+`secretAccessor` on those five secrets.
 
 ### Cost
 
-Seven executions a day — about 210 a month, a few seconds each. Far inside Cloud
-Run's free monthly vCPU-second allowance, with Cloud Scheduler free up to 3 jobs
-and a few hundred bytes in GCS. Effectively free, but check current allowances
-against your own billing rather than taking my word for it.
+Every 10 minutes from 06:00 through 00:50 — 114 executions a day, about 3,400
+a month, a few seconds each. Still well
+inside Cloud Run's free monthly vCPU-second allowance, with Cloud Scheduler free
+up to 3 jobs and a few hundred bytes in GCS. Effectively free, but check current
+allowances against your own billing rather than taking my word for it.
 
 ### Checking on it
 
 ```bash
-gcloud run jobs executions list --job=balansense-notify --region=europe-central2
-gcloud run jobs execute balansense-notify --region=europe-central2 \
+gcloud run jobs executions list --job=balansense-job --region=europe-central2
+gcloud run jobs execute balansense-job --region=europe-central2 \
   --args=--test-send --wait
 ```
 

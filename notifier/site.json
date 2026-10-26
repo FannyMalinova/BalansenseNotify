@@ -4,15 +4,20 @@
   "base_url": "https://balansense.fitsys.com",
   "login": {
     "status": "verified",
-    "url": "/users/login",
-    "fields": {"email": "email", "password": "password", "csrf": "_token"},
-    "failure_text": ["Грешно потребителско име или парола", "Грешни", "credentials"]
+    "note": "Sanctum SPA auth, verified live 2026-09-07. FitSys replaced the server-rendered login form with a Vue SPA: /users/login now serves no <form> and no <input>, so the old scrape of a hidden _token cannot work. The SPA asks /sanctum/csrf-cookie, POSTs JSON to /api/login, then reads /api/context. Success is 200 {\"ok\":true}; wrong credentials are 422 {\"message\":\"Invalid credentials\"}.",
+    "url": "/api/login",
+    "csrf_cookie_url": "/sanctum/csrf-cookie",
+    "csrf_cookie_note": "Answered 401 and set no XSRF-TOKEN cookie on the live site, yet /api/login still succeeded on the fitsys_session cookie alone. Asked for anyway because the SPA does; a failure here is not treated as fatal.",
+    "context_url": "/api/context",
+    "context_note": "Carries siteId, which the calendar page's bootstrap JSON no longer does. Also the cheapest signed-in check: 200 JSON when the session is good, 401 when it is not.",
+    "fields": {"email": "email", "password": "password", "user_id": "user_id"},
+    "user_id_note": "The SPA sends user_id: null unless one login maps to several users. Always null here."
   },
   "calendar": {
     "status": "verified",
     "page_url": "/calendar",
     "site_id": null,
-    "site_id_note": "Read from the calendar page's bootstrap JSON (\"siteId\": N) and cached; set a number here to pin it.",
+    "site_id_note": "Read from /api/context (\"siteId\": N) and cached; set a number here to pin it. It used to be scraped from the calendar page's bootstrap JSON, which no longer carries it -- that scrape had silently fallen through to a hard-coded \"1\", right for this studio only by luck.",
     "chunk_days": 7,
     "chunk_note": "A 4-week request once died mid-response (IncompleteRead); weekly slices succeeded, so reads are chunked.",
     "include_types": ["class"],
@@ -21,9 +26,12 @@
       "status": "verified",
       "url": "/calendar/get-events-basic",
       "method": "GET",
-      "note": "GET only -- POST returns 500. Returns {\"events\": [...]}. The sibling route /calendar/get-events also works but includes customer names and ids, which this app must never hold.",
+      "note": "GET only -- POST returns 500. Returns {\"events\": [...]}. Needs no CSRF header: it is a GET, and it was verified to answer with the session cookie alone.",
       "params": {"start": "{start}", "end": "{end}", "site_id": "{site_id}"},
-      "date_format": "%Y-%m-%d"
+      "date_format": "%Y-%m-%d",
+      "drop_fields": ["customer_names", "customer_ids"],
+      "drop_fields_note": "This feed USED to carry no customer names or ids, which was the whole reason it was chosen over the sibling /calendar/get-events. As of 2026-09-07 it carries both, populated ('Елица Попова,Милена Узунова' / '1166,1528'). The parser never read them, but they now arrive on the wire, so the client deletes them from every row as it is read -- the guarantee is enforced here rather than assumed of the endpoint.",
+      "date_format_note": "start and end are inclusive dates."
     },
     "event_fields": {
       "status": "verified",
